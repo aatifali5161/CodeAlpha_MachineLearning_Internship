@@ -1,0 +1,553 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.datasets import make_classification
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split, cross_val_score, GridSearchCV
+from sklearn.linear_model import LogisticRegression
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import (
+    precision_score, recall_score, f1_score, roc_auc_score,
+    confusion_matrix, classification_report, roc_curve, auc
+)
+import os
+
+# Set style
+sns.set_style('whitegrid')
+plt.rcParams['figure.figsize'] = (12, 6)
+np.random.seed(42)
+
+# ============================================================================
+# STEP 1: GENERATE SYNTHETIC CREDIT DATA
+# ============================================================================
+
+def generate_synthetic_credit_data(n_samples=1000):
+    """
+    Generate synthetic credit dataset for demonstration.
+    
+    Args:
+        n_samples: Number of samples to generate
+    
+    Returns:
+        DataFrame with credit features and target variable
+    """
+    print("\n" + "="*70)
+    print("STEP 1: GENERATING SYNTHETIC CREDIT DATA")
+    print("="*70)
+    print(f"Generating {n_samples} synthetic credit records...")
+    
+    # Generate base features
+    X, y = make_classification(
+        n_samples=n_samples,
+        n_features=10,
+        n_informative=8,
+        n_redundant=2,
+        random_state=42,
+        weights=[0.7, 0.3],  # 70% creditworthy, 30% not
+    )
+    
+    # Create DataFrame with meaningful feature names
+    feature_names = [
+        'income',
+        'age',
+        'employment_length',
+        'credit_history_length',
+        'number_of_loans',
+        'total_debt',
+        'payment_history_score',
+        'credit_utilization',
+        'existing_accounts',
+        'missed_payments'
+    ]
+    
+    df = pd.DataFrame(X, columns=feature_names)
+    
+    # Scale features to realistic ranges
+    df['income'] = np.abs(df['income']) * 30000 + 20000  # 20k to 920k
+    df['age'] = np.clip(np.abs(df['age']) * 15 + 22, 18, 75).astype(int)  # 18-75
+    df['employment_length'] = np.clip(np.abs(df['employment_length']) * 20, 0, 40).astype(int)
+    df['credit_history_length'] = np.clip(np.abs(df['credit_history_length']) * 25, 1, 60).astype(int)
+    df['number_of_loans'] = np.clip(np.abs(df['number_of_loans']) * 8, 0, 15).astype(int)
+    df['total_debt'] = np.abs(df['total_debt']) * 50000
+    df['payment_history_score'] = np.clip(df['payment_history_score'] * 100 + 650, 300, 850)
+    df['credit_utilization'] = np.clip(df['credit_utilization'] * 100, 0, 100)
+    df['existing_accounts'] = np.clip(np.abs(df['existing_accounts']) * 10, 0, 30).astype(int)
+    df['missed_payments'] = np.clip(np.abs(df['missed_payments']) * 12, 0, 50).astype(int)
+    
+    # Add target variable
+    df['creditworthy'] = y
+    
+    print(f"✓ Generated {len(df)} records")
+    print(f"\nDataset Preview:")
+    print(df.head())
+    print(f"\nDataset Shape: {df.shape}")
+    print(f"\nTarget Distribution:")
+    print(df['creditworthy'].value_counts())
+    
+    return df
+
+# ============================================================================
+# STEP 2: PREPROCESS AND FEATURE ENGINEERING
+# ============================================================================
+
+def preprocess_and_engineer_features(df, target_column='creditworthy'):
+    """
+    Preprocess the credit dataset and perform feature engineering.
+    
+    Args:
+        df: Input DataFrame
+        target_column: Name of the target column
+    
+    Returns:
+        Processed data ready for modeling
+    """
+    print("\n" + "="*70)
+    print("STEP 2: PREPROCESSING & FEATURE ENGINEERING")
+    print("="*70)
+    
+    # Handle missing values
+    print("\nHandling missing values...")
+    print(f"Missing values:\n{df.isnull().sum()}")
+    df = df.fillna(df.mean())
+    print("✓ Filled missing values with mean")
+    
+    # Separate features and target
+    X = df.drop(columns=[target_column])
+    y = df[target_column]
+    
+    print(f"\nFeatures shape: {X.shape}")
+    print(f"Target distribution:\n{y.value_counts()}")
+    
+    # Feature Engineering
+    print("\nPerforming feature engineering...")
+    X = X.copy()
+    
+    X['debt_to_income_ratio'] = X['total_debt'] / (X['income'] + 1)
+    X['high_credit_utilization'] = (X['credit_utilization'] > 75).astype(int)
+    X['has_missed_payments'] = (X['missed_payments'] > 0).astype(int)
+    X['many_accounts'] = (X['existing_accounts'] > 10).astype(int)
+    
+    print("✓ Created 4 new engineered features")
+    print(f"New feature columns: ['debt_to_income_ratio', 'high_credit_utilization', 'has_missed_payments', 'many_accounts']")
+    
+    # Split into train and test sets
+    print("\nSplitting data into train/test sets...")
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42, stratify=y
+    )
+    print(f"✓ Training set: {len(X_train)} samples")
+    print(f"✓ Test set: {len(X_test)} samples")
+    
+    # Scale features
+    print("\nScaling features using StandardScaler...")
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_test_scaled = scaler.transform(X_test)
+    
+    X_train_scaled = pd.DataFrame(X_train_scaled, columns=X.columns, index=X_train.index)
+    X_test_scaled = pd.DataFrame(X_test_scaled, columns=X.columns, index=X_test.index)
+    print("✓ Features scaled")
+    
+    return X_train_scaled, X_test_scaled, y_train, y_test
+
+# ============================================================================
+# STEP 3: TRAIN MODELS
+# ============================================================================
+
+def train_models(X_train, y_train):
+    """
+    Train baseline classification models.
+    
+    Args:
+        X_train: Training features
+        y_train: Training target
+    
+    Returns:
+        Dictionary of trained models
+    """
+    print("\n" + "="*70)
+    print("STEP 3: TRAINING BASELINE MODELS")
+    print("="*70)
+    
+    models = {}
+    
+    # Logistic Regression
+    print("\n1. Training Logistic Regression...")
+    lr = LogisticRegression(max_iter=1000, random_state=42, n_jobs=-1)
+    lr.fit(X_train, y_train)
+    cv_scores = cross_val_score(lr, X_train, y_train, cv=5, scoring='roc_auc')
+    print(f"   Cross-validation ROC-AUC: {cv_scores.mean():.4f} (+/- {cv_scores.std():.4f})")
+    models['Logistic Regression'] = lr
+    
+    # Decision Tree
+    print("\n2. Training Decision Tree...")
+    dt = DecisionTreeClassifier(max_depth=10, random_state=42)
+    dt.fit(X_train, y_train)
+    cv_scores = cross_val_score(dt, X_train, y_train, cv=5, scoring='roc_auc')
+    print(f"   Cross-validation ROC-AUC: {cv_scores.mean():.4f} (+/- {cv_scores.std():.4f})")
+    models['Decision Tree'] = dt
+    
+    # Random Forest
+    print("\n3. Training Random Forest...")
+    rf = RandomForestClassifier(n_estimators=100, max_depth=15, random_state=42, n_jobs=-1)
+    rf.fit(X_train, y_train)
+    cv_scores = cross_val_score(rf, X_train, y_train, cv=5, scoring='roc_auc')
+    print(f"   Cross-validation ROC-AUC: {cv_scores.mean():.4f} (+/- {cv_scores.std():.4f})")
+    models['Random Forest'] = rf
+    
+    # Hyperparameter Tuning for Random Forest
+    print("\n4. Hyperparameter Tuning Random Forest...")
+    param_grid = {
+        'n_estimators': [100, 200],
+        'max_depth': [10, 15, 20],
+        'min_samples_split': [2, 5],
+        'min_samples_leaf': [1, 2]
+    }
+    
+    rf_tuned = RandomForestClassifier(random_state=42, n_jobs=-1)
+    grid_search = GridSearchCV(
+        rf_tuned, param_grid, cv=5, scoring='roc_auc', n_jobs=-1, verbose=0
+    )
+    grid_search.fit(X_train, y_train)
+    
+    print(f"   Best parameters: {grid_search.best_params_}")
+    print(f"   Best cross-validation ROC-AUC: {grid_search.best_score_:.4f}")
+    models['Random Forest (Tuned)'] = grid_search.best_estimator_
+    
+    print("\n✓ All models trained successfully!")
+    return models
+
+# ============================================================================
+# STEP 4: EVALUATE MODELS
+# ============================================================================
+
+def evaluate_models(models, X_test, y_test):
+    """
+    Evaluate all trained models on test set.
+    
+    Args:
+        models: Dictionary of trained models
+        X_test: Test features
+        y_test: Test target
+    
+    Returns:
+        Results DataFrame and predictions
+    """
+    print("\n" + "="*70)
+    print("STEP 4: MODEL EVALUATION")
+    print("="*70)
+    
+    results = []
+    predictions = {}
+    probabilities = {}
+    
+    for name, model in models.items():
+        print(f"\nEvaluating {name}...")
+        
+        y_pred = model.predict(X_test)
+        y_pred_proba = model.predict_proba(X_test)[:, 1]
+        
+        predictions[name] = y_pred
+        probabilities[name] = y_pred_proba
+        
+        precision = precision_score(y_test, y_pred)
+        recall = recall_score(y_test, y_pred)
+        f1 = f1_score(y_test, y_pred)
+        roc_auc = roc_auc_score(y_test, y_pred_proba)
+        
+        print(f"  Precision:  {precision:.4f}")
+        print(f"  Recall:     {recall:.4f}")
+        print(f"  F1-Score:   {f1:.4f}")
+        print(f"  ROC-AUC:    {roc_auc:.4f}")
+        
+        results.append({
+            'Model': name,
+            'Precision': precision,
+            'Recall': recall,
+            'F1-Score': f1,
+            'ROC-AUC': roc_auc
+        })
+    
+    results_df = pd.DataFrame(results)
+    return results_df, predictions, probabilities
+
+# ============================================================================
+# STEP 5: VISUALIZATIONS
+# ============================================================================
+
+def create_visualizations(models, results_df, predictions, probabilities, y_test, X_test):
+    """
+    Create comprehensive visualizations.
+    """
+    print("\n" + "="*70)
+    print("STEP 5: CREATING VISUALIZATIONS")
+    print("="*70)
+    
+    os.makedirs('credit_scoring_results', exist_ok=True)
+    
+    # 1. Metrics Comparison
+    print("\nGenerating metrics comparison chart...")
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    axes = axes.ravel()
+    
+    metrics = ['Precision', 'Recall', 'F1-Score', 'ROC-AUC']
+    colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728']
+    
+    for idx, metric in enumerate(metrics):
+        axes[idx].bar(results_df['Model'], results_df[metric], color=colors[idx], alpha=0.7)
+        axes[idx].set_title(f'{metric} Comparison', fontweight='bold', fontsize=12)
+        axes[idx].set_ylabel(metric, fontsize=10)
+        axes[idx].set_ylim([0, 1])
+        axes[idx].tick_params(axis='x', rotation=45)
+        axes[idx].grid(axis='y', alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig('credit_scoring_results/metrics_comparison.png', dpi=300, bbox_inches='tight')
+    print("✓ Saved: metrics_comparison.png")
+    plt.close()
+    
+    # 2. ROC Curves
+    print("Generating ROC curves...")
+    plt.figure(figsize=(10, 8))
+    
+    for name in models.keys():
+        fpr, tpr, _ = roc_curve(y_test, probabilities[name])
+        roc_auc = auc(fpr, tpr)
+        plt.plot(fpr, tpr, label=f'{name} (AUC = {roc_auc:.3f})', linewidth=2)
+    
+    plt.plot([0, 1], [0, 1], 'k--', label='Random Classifier', linewidth=1)
+    plt.xlabel('False Positive Rate', fontsize=12)
+    plt.ylabel('True Positive Rate', fontsize=12)
+    plt.title('ROC Curves - Credit Scoring Models', fontsize=14, fontweight='bold')
+    plt.legend(loc='lower right', fontsize=10)
+    plt.grid(alpha=0.3)
+    plt.savefig('credit_scoring_results/roc_curves.png', dpi=300, bbox_inches='tight')
+    print("✓ Saved: roc_curves.png")
+    plt.close()
+    
+    # 3. Confusion Matrices
+    print("Generating confusion matrices...")
+    n_models = len(models)
+    fig, axes = plt.subplots(1, n_models, figsize=(5*n_models, 4))
+    
+    if n_models == 1:
+        axes = [axes]
+    
+    for idx, (name, ax) in enumerate(zip(models.keys(), axes)):
+        cm = confusion_matrix(y_test, predictions[name])
+        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=ax, cbar=False,
+                   xticklabels=['Not Creditworthy', 'Creditworthy'],
+                   yticklabels=['Not Creditworthy', 'Creditworthy'])
+        ax.set_title(f'{name}', fontweight='bold')
+        ax.set_xlabel('Predicted')
+        ax.set_ylabel('Actual')
+    
+    plt.tight_layout()
+    plt.savefig('credit_scoring_results/confusion_matrices.png', dpi=300, bbox_inches='tight')
+    print("✓ Saved: confusion_matrices.png")
+    plt.close()
+    
+    # 4. Feature Importance (Random Forest)
+    print("Generating feature importance chart...")
+    rf_model = models['Random Forest']
+    feature_importance = pd.DataFrame({
+        'Feature': X_test.columns,
+        'Importance': rf_model.feature_importances_
+    }).sort_values('Importance', ascending=True).tail(10)
+    
+    plt.figure(figsize=(10, 6))
+    plt.barh(feature_importance['Feature'], feature_importance['Importance'], color='steelblue')
+    plt.xlabel('Importance', fontsize=12)
+    plt.title('Top 10 Important Features - Random Forest', fontweight='bold', fontsize=12)
+    plt.tight_layout()
+    plt.savefig('credit_scoring_results/feature_importance.png', dpi=300, bbox_inches='tight')
+    print("✓ Saved: feature_importance.png")
+    plt.close()
+    
+    print("\n✓ All visualizations generated successfully!")
+
+# ============================================================================
+# STEP 6: DETAILED ANALYSIS
+# ============================================================================
+
+def print_detailed_analysis(models, results_df, predictions, y_test):
+    """
+    Print detailed analysis and reports.
+    """
+    print("\n" + "="*70)
+    print("STEP 6: DETAILED ANALYSIS & REPORTS")
+    print("="*70)
+    
+    print("\n" + "-"*70)
+    print("SUMMARY METRICS")
+    print("-"*70)
+    print(results_df.to_string(index=False))
+    
+    print("\n" + "-"*70)
+    print("CONFUSION MATRICES")
+    print("-"*70)
+    for name in models.keys():
+        print(f"\n{name}:")
+        cm = confusion_matrix(y_test, predictions[name])
+        print(cm)
+        tn, fp, fn, tp = cm.ravel()
+        print(f"  TN: {tn}, FP: {fp}")
+        print(f"  FN: {fn}, TP: {tp}")
+    
+    print("\n" + "-"*70)
+    print("CLASSIFICATION REPORTS")
+    print("-"*70)
+    for name in models.keys():
+        print(f"\n{name}:")
+        print(classification_report(y_test, predictions[name],
+                                   target_names=['Not Creditworthy', 'Creditworthy']))
+    
+    # Find best models
+    print("\n" + "="*70)
+    print("BEST PERFORMING MODELS")
+    print("="*70)
+    
+    best_roc_auc_idx = results_df['ROC-AUC'].idxmax()
+    best_f1_idx = results_df['F1-Score'].idxmax()
+    best_precision_idx = results_df['Precision'].idxmax()
+    best_recall_idx = results_df['Recall'].idxmax()
+    
+    print(f"\n✓ Best ROC-AUC: {results_df.iloc[best_roc_auc_idx]['Model']} ({results_df.iloc[best_roc_auc_idx]['ROC-AUC']:.4f})")
+    print(f"✓ Best F1-Score: {results_df.iloc[best_f1_idx]['Model']} ({results_df.iloc[best_f1_idx]['F1-Score']:.4f})")
+    print(f"✓ Best Precision: {results_df.iloc[best_precision_idx]['Model']} ({results_df.iloc[best_precision_idx]['Precision']:.4f})")
+    print(f"✓ Best Recall: {results_df.iloc[best_recall_idx]['Model']} ({results_df.iloc[best_recall_idx]['Recall']:.4f})")
+    
+    print("\n" + "="*70)
+    print("KEY INSIGHTS")
+    print("="*70)
+    print("""
+✓ 1. Random Forest generally provides best overall performance
+✓ 2. Hyperparameter tuning improves model robustness
+✓ 3. Feature engineering enhances predictive power
+✓ 4. Balance precision vs recall based on business needs:
+    - High Precision: Minimize false positives (bad loans)
+    - High Recall: Minimize false negatives (good customers rejected)
+✓ 5. Cross-validation ensures model generalization
+    """)
+    
+    print("\n" + "="*70)
+    print("RECOMMENDATIONS")
+    print("="*70)
+    print("""
+✓ 1. Deploy the Random Forest (Tuned) model for production
+✓ 2. Set decision threshold based on business risk tolerance
+✓ 3. Monitor model performance regularly on new data
+✓ 4. Retrain model quarterly with updated information
+✓ 5. Combine automated decisions with expert review
+✓ 6. Audit model for demographic bias in lending
+✓ 7. Use SHAP values for explainability to customers
+    """)
+
+# ============================================================================
+# MAIN EXECUTION
+# ============================================================================
+
+def main():
+    """
+    Main execution function.
+    """
+    print("\n" + "#"*70)
+    print("#" + " "*68 + "#")
+    print("#" + "  CREDIT SCORING MODEL - COMPLETE PIPELINE".center(68) + "#")
+    print("#" + " "*68 + "#")
+    print("#"*70)
+    
+    # Step 1: Generate synthetic data
+    df = generate_synthetic_credit_data(n_samples=1000)
+    
+    # Step 2: Preprocess and feature engineering
+    X_train, X_test, y_train, y_test = preprocess_and_engineer_features(df)
+    
+    # Step 3: Train models
+    models = train_models(X_train, y_train)
+    
+    # Step 4: Evaluate models
+    results_df, predictions, probabilities = evaluate_models(models, X_test, y_test)
+    
+    # Step 5: Create visualizations
+    create_visualizations(models, results_df, predictions, probabilities, y_test, X_test)
+    
+    # Step 6: Detailed analysis
+    print_detailed_analysis(models, results_df, predictions, y_test)
+    
+    print("\n" + "#"*70)
+    print("#" + " "*68 + "#")
+    print("#" + "  ✓ PIPELINE EXECUTION COMPLETE!".center(68) + "#")
+    print("#" + " "*68 + "#")
+    print("#"*70)
+    print("\n📊 Results saved to: credit_scoring_results/")
+    print("   - metrics_comparison.png")
+    print("   - roc_curves.png")
+    print("   - confusion_matrices.png")
+    print("   - feature_importance.png")
+    print("\n")
+
+if __name__ == "__main__":
+    main()
+
+absl-py==2.4.0
+astunparse==1.6.3
+audioread==3.1.0
+certifi==2026.5.20
+cffi==2.0.0
+charset-normalizer==3.4.7
+contourpy==1.3.3
+cycler==0.12.1
+decorator==5.3.1
+flatbuffers==25.12.19
+fonttools==4.63.0
+gast==0.7.0
+google-pasta==0.2.0
+grpcio==1.81.1
+h5py==3.14.0
+idna==3.18
+joblib==1.5.3
+keras==3.14.1
+kiwisolver==1.5.0
+lazy-loader==0.5
+libclang==18.1.1
+librosa==0.11.0
+llvmlite==0.47.0
+markdown-it-py==4.2.0
+matplotlib==3.11.0
+mdurl==0.1.2
+ml_dtypes==0.5.4
+msgpack==1.2.0
+namex==0.1.0
+narwhals==2.22.1
+numba==0.65.1
+numpy==2.4.6
+opt_einsum==3.4.0
+optree==0.19.1
+packaging==26.2
+pandas==3.0.3
+pillow==12.2.0
+platformdirs==4.10.0
+pooch==1.9.0
+protobuf==7.35.1
+pycparser==3.0
+Pygments==2.20.0
+pyparsing==3.3.2
+python-dateutil==2.9.0.post0
+requests==2.34.2
+rich==15.0.0
+scikit-learn==1.9.0
+scipy==1.17.1
+seaborn==0.13.2
+six==1.17.0
+soundfile==0.14.0
+soxr==1.1.0
+tensorflow==2.21.0
+termcolor==3.3.0
+threadpoolctl==3.6.0
+typing_extensions==4.15.0
+tzdata==2026.2
+urllib3==2.7.0
+wrapt==2.2.1
